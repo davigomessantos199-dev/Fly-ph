@@ -1,0 +1,477 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local StarterGui = game:GetService("StarterGui")
+
+-----------------------------
+-- 2. VARIÁVEIS
+-----------------------------
+local LocalPlayer = Players.LocalPlayer
+
+-- Carrega módulos
+local ModulesFolder = ReplicatedStorage:WaitForChild("Modules")
+local FlyController = require(ModulesFolder:WaitForChild("FlyController"))
+local SaveTeleport = require(ModulesFolder:WaitForChild("SaveTeleport"))
+
+-- Estado
+local flyCtrl = FlyController.new(LocalPlayer, {
+    Speed = 32,
+    SmoothTime = 0.15,
+    UseBodyMover = true,
+})
+
+local st = SaveTeleport.new(LocalPlayer)
+st:LoadLocal()
+
+-- Config local (pode ser salvo em _G via SaveLocal)
+local Config = {
+    UI_Open = true,
+    Fly_Enabled = false,
+    Fly_Speed = 32,
+    KeybindToggleUI = Enum.KeyCode.RightControl, -- opcional
+    Theme = {
+        Background = Color3.fromRGB(22,22,26),
+        Foreground = Color3.fromRGB(235,235,240),
+        Accent = Color3.fromRGB(0,170,255),
+        Muted = Color3.fromRGB(40,40,48)
+    }
+}
+
+-----------------------------
+-- 3. UI
+-----------------------------
+-- UI simples e responsiva com duas abas (Fly / Save TP)
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "DevTools_Private"
+screenGui.ResetOnSpawn = false
+screenGui.IgnoreGuiInset = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+screenGui.Parent = LocalPlayer:WaitForChild("PlayerGui")
+
+local uiPadding = 12
+local frame = Instance.new("Frame")
+frame.Name = "Main"
+frame.Size = UDim2.fromOffset(420, 280)
+frame.Position = UDim2.new(0, uiPadding, 0, 100)
+frame.BackgroundColor3 = Config.Theme.Background
+frame.BorderSizePixel = 0
+frame.Parent = screenGui
+
+-- Arrastar
+local dragging = false
+local dragStart: Vector2? = nil
+local startPos: UDim2? = nil
+frame.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = true
+        dragStart = input.Position
+        startPos = frame.Position
+    end
+end)
+frame.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        dragging = false
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and dragStart and startPos and input.UserInputType == Enum.UserInputType.MouseMovement then
+        local delta = input.Position - dragStart
+        frame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end)
+
+-- Header
+local header = Instance.new("Frame")
+header.Name = "Header"
+header.Size = UDim2.new(1, 0, 0, 40)
+header.BackgroundColor3 = Config.Theme.Muted
+header.BorderSizePixel = 0
+header.Parent = frame
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -80, 1, 0)
+title.Position = UDim2.new(0, 12, 0, 0)
+title.BackgroundTransparency = 1
+title.Text = "Dev Fly & Teleport (Privado)"
+title.TextColor3 = Config.Theme.Foreground
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Font = Enum.Font.GothamMedium
+title.TextSize = 16
+title.Parent = header
+
+local toggleBtn = Instance.new("TextButton")
+toggleBtn.Name = "Toggle"
+toggleBtn.Size = UDim2.fromOffset(70, 24)
+toggleBtn.Position = UDim2.new(1, -82, 0.5, -12)
+toggleBtn.BackgroundColor3 = Config.Theme.Accent
+toggleBtn.TextColor3 = Color3.new(1,1,1)
+toggleBtn.Text = "Ocultar"
+toggleBtn.AutoButtonColor = true
+toggleBtn.Font = Enum.Font.Gotham
+toggleBtn.TextSize = 14
+toggleBtn.Parent = header
+toggleBtn.MouseButton1Click:Connect(function()
+    Config.UI_Open = not Config.UI_Open
+    toggleBtn.Text = if Config.UI_Open then "Ocultar" else "Mostrar"
+    local goal = { BackgroundTransparency = if Config.UI_Open then 0 else 1 }
+    local tw = TweenService:Create(frame, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), goal)
+    tw:Play()
+    for _, d in ipairs(frame:GetDescendants()) do
+        if d:IsA("GuiObject") and d ~= header and d ~= toggleBtn and d ~= title then
+            d.Visible = Config.UI_Open
+        end
+    end
+end)
+
+-- Tabs
+local tabs = Instance.new("Frame")
+tabs.Name = "Tabs"
+tabs.Size = UDim2.new(1, 0, 0, 32)
+tabs.Position = UDim2.new(0, 0, 0, 40)
+tabs.BackgroundTransparency = 1
+tabs.Parent = frame
+
+local tabFly = Instance.new("TextButton")
+tabFly.Size = UDim2.new(0, 120, 1, 0)
+tabFly.Position = UDim2.new(0, 12, 0, 0)
+tabFly.BackgroundColor3 = Config.Theme.Accent
+tabFly.TextColor3 = Color3.new(1,1,1)
+tabFly.Text = "Fly"
+tabFly.Font = Enum.Font.GothamMedium
+tabFly.TextSize = 14
+tabFly.Parent = tabs
+
+local tabTP = Instance.new("TextButton")
+tabTP.Size = UDim2.new(0, 140, 1, 0)
+tabTP.Position = UDim2.new(0, 140, 0, 0)
+tabTP.BackgroundColor3 = Config.Theme.Muted
+tabTP.TextColor3 = Config.Theme.Foreground
+tabTP.Text = "Save Teleport"
+tabTP.Font = Enum.Font.GothamMedium
+tabTP.TextSize = 14
+tabTP.Parent = tabs
+
+local content = Instance.new("Frame")
+content.Name = "Content"
+content.Size = UDim2.new(1, -24, 1, -40 - 32 - 12)
+content.Position = UDim2.new(0, 12, 0, 40 + 32 + 6)
+content.BackgroundTransparency = 1
+content.Parent = frame
+
+local pageFly = Instance.new("Frame")
+pageFly.Size = UDim2.fromScale(1,1)
+pageFly.BackgroundTransparency = 1
+pageFly.Parent = content
+
+local pageTP = Instance.new("Frame")
+pageTP.Size = UDim2.fromScale(1,1)
+pageTP.BackgroundTransparency = 1
+pageTP.Visible = false
+pageTP.Parent = content
+
+local function selectTab(which: "Fly" | "TP")
+    if which == "Fly" then
+        pageFly.Visible = true
+        pageTP.Visible = false
+        tabFly.BackgroundColor3 = Config.Theme.Accent
+        tabFly.TextColor3 = Color3.new(1,1,1)
+        tabTP.BackgroundColor3 = Config.Theme.Muted
+        tabTP.TextColor3 = Config.Theme.Foreground
+    else
+        pageFly.Visible = false
+        pageTP.Visible = true
+        tabTP.BackgroundColor3 = Config.Theme.Accent
+        tabTP.TextColor3 = Color3.new(1,1,1)
+        tabFly.BackgroundColor3 = Config.Theme.Muted
+        tabFly.TextColor3 = Config.Theme.Foreground
+    end
+end
+tabFly.MouseButton1Click:Connect(function() selectTab("Fly") end)
+tabTP.MouseButton1Click:Connect(function() selectTab("TP") end)
+
+-- Componentes Página Fly
+local flyToggle = Instance.new("TextButton")
+flyToggle.Size = UDim2.new(0, 120, 0, 36)
+flyToggle.Position = UDim2.new(0, 0, 0, 0)
+flyToggle.BackgroundColor3 = Color3.fromRGB(60, 180, 90)
+flyToggle.Text = "Ativar Fly"
+flyToggle.TextColor3 = Color3.new(1,1,1)
+flyToggle.Font = Enum.Font.Gotham
+flyToggle.TextSize = 14
+flyToggle.Parent = pageFly
+
+local speedLabel = Instance.new("TextLabel")
+speedLabel.Size = UDim2.new(0, 200, 0, 20)
+speedLabel.Position = UDim2.new(0, 0, 0, 50)
+speedLabel.BackgroundTransparency = 1
+speedLabel.Text = "Velocidade: 32"
+speedLabel.TextColor3 = Config.Theme.Foreground
+speedLabel.Font = Enum.Font.Gotham
+speedLabel.TextSize = 14
+speedLabel.Parent = pageFly
+
+local speedSlider = Instance.new("TextButton")
+speedSlider.Name = "SpeedSlider"
+speedSlider.Size = UDim2.new(0, 260, 0, 12)
+speedSlider.Position = UDim2.new(0, 0, 0, 80)
+speedSlider.BackgroundColor3 = Config.Theme.Muted
+speedSlider.AutoButtonColor = false
+speedSlider.Text = ""
+speedSlider.Parent = pageFly
+
+local fill = Instance.new("Frame")
+fill.Name = "Fill"
+fill.BackgroundColor3 = Config.Theme.Accent
+fill.BorderSizePixel = 0
+fill.Size = UDim2.new(0, 0, 1, 0)
+fill.Parent = speedSlider
+
+local draggingSlider = false
+local minSpd, maxSpd = 4, 200
+local function updateSliderFromX(x: number)
+    local rel = math.clamp((x - speedSlider.AbsolutePosition.X) / speedSlider.AbsoluteSize.X, 0, 1)
+    local spd = math.floor(minSpd + (maxSpd - minSpd) * rel + 0.5)
+    fill.Size = UDim2.new(rel, 0, 1, 0)
+    speedLabel.Text = "Velocidade: " .. tostring(spd)
+    flyCtrl:SetSpeed(spd)
+    Config.Fly_Speed = spd
+end
+speedSlider.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        draggingSlider = true
+        updateSliderFromX(input.Position.X)
+    end
+end)
+speedSlider.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        draggingSlider = false
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if draggingSlider and input.UserInputType == Enum.UserInputType.MouseMovement then
+        updateSliderFromX(input.Position.X)
+    end
+end)
+
+-- NoClip opcional toggle
+local noclipToggle = Instance.new("TextButton")
+noclipToggle.Size = UDim2.new(0, 120, 0, 32)
+noclipToggle.Position = UDim2.new(0, 0, 0, 110)
+noclipToggle.BackgroundColor3 = Config.Theme.Muted
+noclipToggle.TextColor3 = Config.Theme.Foreground
+noclipToggle.Text = "NoClip: Auto"
+noclipToggle.Font = Enum.Font.Gotham
+noclipToggle.TextSize = 14
+noclipToggle.Parent = pageFly
+noclipToggle.MouseButton1Click:Connect(function()
+    -- NoClip é automático durante Fly; botão informativo
+    StarterGui:SetCore("SendNotification", { Title = "Info"; Text = "NoClip é ativado apenas durante o Fly."; Duration = 2 })
+end)
+
+-- Componentes Página Save Teleport
+local addBtn = Instance.new("TextButton")
+addBtn.Size = UDim2.new(0, 160, 0, 32)
+addBtn.Position = UDim2.new(0, 0, 0, 0)
+addBtn.BackgroundColor3 = Config.Theme.Accent
+addBtn.TextColor3 = Color3.new(1,1,1)
+addBtn.Text = "Salvar Posição"
+addBtn.Font = Enum.Font.Gotham
+addBtn.TextSize = 14
+addBtn.Parent = pageTP
+
+local listFrame = Instance.new("ScrollingFrame")
+listFrame.Name = "List"
+listFrame.Size = UDim2.new(1, -12, 1, -44)
+listFrame.Position = UDim2.new(0, 0, 0, 44)
+listFrame.BackgroundTransparency = 1
+listFrame.BorderSizePixel = 0
+listFrame.ScrollBarThickness = 6
+listFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+listFrame.Parent = pageTP
+
+local uiList = Instance.new("UIListLayout")
+uiList.Padding = UDim.new(0, 6)
+uiList.SortOrder = Enum.SortOrder.LayoutOrder
+uiList.Parent = listFrame
+
+local function makeRow(id: string, cf: CFrame)
+    local row = Instance.new("Frame")
+    row.Name = id
+    row.Size = UDim2.new(1, -6, 0, 40)
+    row.BackgroundColor3 = Config.Theme.Muted
+    row.BorderSizePixel = 0
+    row.Parent = listFrame
+
+    local nameLbl = Instance.new("TextLabel")
+    nameLbl.Size = UDim2.new(1, -220, 1, 0)
+    nameLbl.Position = UDim2.new(0, 10, 0, 0)
+    nameLbl.BackgroundTransparency = 1
+    nameLbl.Text = id
+    nameLbl.TextColor3 = Config.Theme.Foreground
+    nameLbl.Font = Enum.Font.Gotham
+    nameLbl.TextSize = 14
+    nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+    nameLbl.Parent = row
+
+    local tpBtn = Instance.new("TextButton")
+    tpBtn.Size = UDim2.new(0, 90, 0, 28)
+    tpBtn.Position = UDim2.new(1, -200, 0.5, -14)
+    tpBtn.BackgroundColor3 = Color3.fromRGB(70, 160, 240)
+    tpBtn.TextColor3 = Color3.new(1,1,1)
+    tpBtn.Text = "Teleportar"
+    tpBtn.Font = Enum.Font.Gotham
+    tpBtn.TextSize = 14
+    tpBtn.Parent = row
+
+    local delBtn = Instance.new("TextButton")
+    delBtn.Size = UDim2.new(0, 90, 0, 28)
+    delBtn.Position = UDim2.new(1, -100, 0.5, -14)
+    delBtn.BackgroundColor3 = Color3.fromRGB(200, 60, 70)
+    delBtn.TextColor3 = Color3.new(1,1,1)
+    delBtn.Text = "Deletar"
+    delBtn.Font = Enum.Font.Gotham
+    delBtn.TextSize = 14
+    delBtn.Parent = row
+
+    tpBtn.MouseButton1Click:Connect(function()
+        local ok = st:TeleportTo(id)
+        StarterGui:SetCore("SendNotification", {
+            Title = if ok then "Teleport" else "Erro",
+            Text = if ok then ("Teleportado para " .. id) else "Falha ao teleportar.",
+            Duration = 2
+        })
+    end)
+
+    delBtn.MouseButton1Click:Connect(function()
+        if st:Remove(id) then
+            row:Destroy()
+            StarterGui:SetCore("SendNotification", { Title = "Removido"; Text = id; Duration = 1.5 })
+            task.defer(function()
+                st:SaveLocal()
+            end)
+        end
+    end)
+
+    return row
+end
+
+local function refreshList()
+    for _, c in ipairs(listFrame:GetChildren()) do
+        if c:IsA("Frame") then
+            c:Destroy()
+        end
+    end
+    local pts = st:List()
+    local idx = 0
+    for id, cf in pairs(pts) do
+        idx += 1
+        local row = makeRow(id, cf)
+        row.LayoutOrder = idx
+    end
+    task.defer(function()
+        listFrame.CanvasSize = UDim2.new(0, 0, 0, uiList.AbsoluteContentSize.Y + 12)
+    end)
+end
+
+addBtn.MouseButton1Click:Connect(function()
+    local id = st:AddCurrent()
+    if id ~= "" then
+        makeRow(id, st:List()[id])
+        task.defer(function()
+            listFrame.CanvasSize = UDim2.new(0, 0, 0, uiList.AbsoluteContentSize.Y + 12)
+        end)
+        StarterGui:SetCore("SendNotification", { Title = "Salvo"; Text = id; Duration = 1.75 })
+        task.defer(function()
+            st:SaveLocal()
+        end)
+    end
+end)
+
+-----------------------------
+-- 4. FLY SYSTEM
+-----------------------------
+local function applyFlyUIState()
+    if Config.Fly_Enabled then
+        flyToggle.Text = "Desativar Fly"
+        flyToggle.BackgroundColor3 = Color3.fromRGB(200, 80, 80)
+    else
+        flyToggle.Text = "Ativar Fly"
+        flyToggle.BackgroundColor3 = Color3.fromRGB(60, 180, 90)
+    end
+    speedLabel.Text = "Velocidade: " .. tostring(Config.Fly_Speed)
+    local rel = (Config.Fly_Speed - 4) / (200 - 4)
+    fill.Size = UDim2.new(math.clamp(rel, 0, 1), 0, 1, 0)
+end
+
+flyToggle.MouseButton1Click:Connect(function()
+    Config.Fly_Enabled = not Config.Fly_Enabled
+    if Config.Fly_Enabled then
+        flyCtrl:SetSpeed(Config.Fly_Speed)
+        flyCtrl:Enable()
+    else
+        flyCtrl:Disable()
+    end
+    applyFlyUIState()
+end)
+
+-----------------------------
+-- 5. SAVE TELEPORT SYSTEM
+-----------------------------
+-- Já coberto pelo módulo SaveTeleport e UI acima (salvar, listar, teleportar, deletar).
+-- Funcionamento via CFrame garantido no módulo.
+
+-----------------------------
+-- 6. EVENTOS
+-----------------------------
+-- Atualiza UI ao spawn do personagem
+local function onCharacterAdded(_char: Model)
+    -- Se o Fly estava ativo e o jogador respawnou, reativa
+    if Config.Fly_Enabled and not flyCtrl:IsEnabled() then
+        task.wait(0.2) -- aguarda montagem do HRP
+        flyCtrl:Enable()
+    end
+end
+LocalPlayer.CharacterAdded:Connect(onCharacterAdded)
+if LocalPlayer.Character then
+    onCharacterAdded(LocalPlayer.Character)
+end
+
+-- Keybind para abrir/fechar a UI
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    if input.KeyCode == Config.KeybindToggleUI then
+        toggleBtn:Activate()
+    end
+end)
+
+-----------------------------
+-- 7. CONFIGURAÇÕES
+-----------------------------
+-- Carrega estado salvo simples (sessão)
+do
+    -- Restaura velocidade se previamente alterada
+    if typeof(Config.Fly_Speed) == "number" then
+        flyCtrl:SetSpeed(Config.Fly_Speed)
+    end
+    applyFlyUIState()
+    refreshList()
+end
+
+-- Notificação discreta de ambiente de teste
+task.defer(function()
+    StarterGui:SetCore("SendNotification", {
+        Title = "Modo Dev Privado",
+        Text = "Ferramentas ativas apenas para testes autorizados.",
+        Duration = 3
+    })
+end)
+
+-- Limpeza ao encerrar
+game:BindToClose(function()
+    st:SaveLocal()
+    if flyCtrl:IsEnabled() then
+        flyCtrl:Disable()
+    end
+end)
