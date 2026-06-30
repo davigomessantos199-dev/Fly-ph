@@ -1,0 +1,299 @@
+--!strict
+--[[
+FlyController.lua
+Módulo de voo suave e estável para testes privados.
+Compatível com R6/R15. Evita loops pesados usando RunService.Stepped/RenderStepped.
+Exige personagem padrão com Humanoid e HumanoidRootPart.
+
+API:
+FlyController.new(player, configTable?) -> FlyController
+:Enable()
+:Disable()
+:SetSpeed(number)
+:IsEnabled() -> boolean
+:Destroy()
+
+Config (opcional):
+{
+    Speed: number, -- velocidade base (studs/seg)
+    SmoothTime: number, -- suavização de aceleração
+    UseBodyMover: boolean, -- true = usa VectorForce+AlignOrientation; false = CFrame
+}
+]]
+
+local RunService = game:GetService("RunService")
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+
+export type FlyConfig = {
+    Speed: number?,
+    SmoothTime: number?,
+    UseBodyMover: boolean?,
+}
+
+export type FlyController = {
+    Enable: (self: any) -> (),
+    Disable: (self: any) -> (),
+    SetSpeed: (self: any, spd: number) -> (),
+    IsEnabled: (self: any) -> boolean,
+    Destroy: (self: any) -> ()
+}
+
+local DEFAULTS: FlyConfig = {
+    Speed = 32,
+    SmoothTime = 0.15,
+    UseBodyMover = true,
+}
+
+local FlyController = {}
+FlyController.__index = FlyController
+
+local function getCharacterRoot(player: Player): (Model?, BasePart?)
+    local char = player.Character
+    if not char or not char.Parent then return nil, nil end
+    local hrp = char:FindFirstChild("HumanoidRootPart") :: BasePart?
+    if not hrp then return char, nil end
+    return char, hrp
+end
+
+local function createForces(hrp: BasePart)
+    -- Usamos Attachment + VectorForce para força estável e AlignOrientation para manter rotação.
+    local rootAtt = Instance.new("Attachment")
+    rootAtt.Name = "Fly_Attachment"
+    rootAtt.Parent = hrp
+
+    local vf = Instance.new("VectorForce")
+    vf.Name = "Fly_VectorForce"
+    vf.RelativeTo = Enum.ActuatorRelativeTo.World
+    vf.Force = Vector3.zero
+    vf.Attachment0 = rootAtt
+    vf.Parent = hrp
+
+    local ao = Instance.new("AlignOrientation")
+    ao.Name = "Fly_AlignOrientation"
+    ao.Mode = Enum.OrientationAlignmentMode.OneAttachment
+    ao.Responsiveness = 50
+    ao.RigidityEnabled = false
+    ao.Attachment0 = rootAtt
+    ao.Parent = hrp
+
+    return rootAtt, vf, ao
+end
+
+function FlyController.new(player: Player, cfg: FlyConfig?): FlyController
+    local self = setmetatable({}, FlyController)
+
+    self.Player = player
+    self.Config = table.clone(DEFAULTS)
+    if cfg then
+        for k, v in pairs(cfg) do
+            (self.Config :: any)[k] = v
+        end
+    end
+
+    self.Enabled = false
+    self.Speed = self.Config.Speed :: number
+    self.SmoothVel = Vector3.zero
+    self.MoveDir = Vector3.zero
+    self.ConnStepped = nil :: RBXScriptConnection?
+    self.ConnInputBegan = nil :: RBXScriptConnection?
+    self.ConnInputEnded = nil :: RBXScriptConnection?
+    self.Forces = { Attachment = nil, VectorForce = nil, AlignOrientation = nil }
+    self.NoClip = false -- opcional; pode ser ajustado externamente se desejado
+
+    -- Buffer de inputs
+    self.KeysDown = {
+        W = false, A = false, S = false, D = false, Q = false, E = false,
+        Space = false, LeftShift = false
+    }
+
+    return self
+end
+
+function FlyController:IsEnabled(): boolean
+    return self.Enabled
+end
+
+function FlyController:SetSpeed(spd: number)
+    self.Speed = math.clamp(spd, 4, 300)
+end
+
+local function lerpVec(a: Vector3, b: Vector3, t: number): Vector3
+    return a + (b - a) * math.clamp(t, 0, 1)
+end
+
+local function getCameraCF(): CFrame
+    local cam = workspace.CurrentCamera
+    return cam and cam.CFrame or CFrame.new()
+end
+
+local function computeMoveVector(self): Vector3
+    -- Direções baseadas na câmera para um voo natural
+    local camCF = getCameraCF()
+    local look = camCF.LookVector
+    local right = camCF.RightVector
+    local up = Vector3.yAxis
+
+    local dir = Vector3.zero
+    if self.KeysDown.W then dir += look end
+    if self.KeysDown.S then dir -= look end
+    if self.KeysDown.D then dir += right end
+    if self.KeysDown.A then dir -= right end
+    if self.KeysDown.Space then dir += up end
+    if self.KeysDown.Q then dir -= up end
+    if self.KeysDown.E then dir += up end
+
+    -- Normalização com tolerância
+    local mag = dir.Magnitude
+    if mag > 0.001 then
+        dir = dir.Unit
+    else
+        dir = Vector3.zero
+    end
+    return dir
+end
+
+local function setNoClip(char: Model, enabled: boolean)
+    for _, d in ipairs(char:GetDescendants()) do
+        local p = d :: any
+        if typeof(p) == "Instance" and p:IsA("BasePart") then
+            p.CanCollide = not enabled
+        end
+    end
+end
+
+function FlyController:Enable()
+    if self.Enabled then return end
+    self.Enabled = true
+
+    local _, hrp = getCharacterRoot(self.Player)
+    if not hrp then
+        warn("[FlyController] HumanoidRootPart não encontrado.")
+        self.Enabled = false
+        return
+    end
+
+    if self.Config.UseBodyMover then
+        local att, vf, ao = createForces(hrp)
+        self.Forces.Attachment = att
+        self.Forces.VectorForce = vf
+        self.Forces.AlignOrientation = ao
+    end
+
+    -- Opcional: NoClip leve enquanto voando para evitar travas
+    self.NoClip = true
+    local char = self.Player.Character
+    if char then setNoClip(char, true) end
+
+    -- Captura de input
+    self.ConnInputBegan = UserInputService.InputBegan:Connect(function(input, gpe)
+        if gpe then return end
+        local key = input.KeyCode
+        if key == Enum.KeyCode.W then self.KeysDown.W = true end
+        if key == Enum.KeyCode.A then self.KeysDown.A = true end
+        if key == Enum.KeyCode.S then self.KeysDown.S = true end
+        if key == Enum.KeyCode.D then self.KeysDown.D = true end
+        if key == Enum.KeyCode.Q then self.KeysDown.Q = true end
+        if key == Enum.KeyCode.E then self.KeysDown.E = true end
+        if key == Enum.KeyCode.Space then self.KeysDown.Space = true end
+        if key == Enum.KeyCode.LeftShift then self.KeysDown.LeftShift = true end
+    end)
+
+    self.ConnInputEnded = UserInputService.InputEnded:Connect(function(input, _gpe)
+        local key = input.KeyCode
+        if key == Enum.KeyCode.W then self.KeysDown.W = false end
+        if key == Enum.KeyCode.A then self.KeysDown.A = false end
+        if key == Enum.KeyCode.S then self.KeysDown.S = false end
+        if key == Enum.KeyCode.D then self.KeysDown.D = false end
+        if key == Enum.KeyCode.Q then self.KeysDown.Q = false end
+        if key == Enum.KeyCode.E then self.KeysDown.E = false end
+        if key == Enum.KeyCode.Space then self.KeysDown.Space = false end
+        if key == Enum.KeyCode.LeftShift then self.KeysDown.LeftShift = false end
+    end)
+
+    -- Loop leve de física: usa Stepped para consistência com simulação
+    local smooth = self.Config.SmoothTime or 0.15
+    local accelFactor = if smooth > 0 then (1 / math.max(smooth * 60, 1)) else 1
+
+    self.ConnStepped = RunService.Stepped:Connect(function(_, dt)
+        local charNow, hrpNow = getCharacterRoot(self.Player)
+        if not charNow or not hrpNow then return end
+
+        -- Atualiza NoClip enquanto ativo
+        if self.NoClip then
+            setNoClip(charNow, true)
+        end
+
+        local baseSpeed = self.Speed
+        local sprintMul = if self.KeysDown.LeftShift then 1.75 else 1.0
+        local targetVel = computeMoveVector(self) * baseSpeed * sprintMul
+
+        -- Suavização
+        self.SmoothVel = lerpVec(self.SmoothVel, targetVel, accelFactor)
+
+        if self.Config.UseBodyMover and self.Forces.VectorForce and self.Forces.AlignOrientation then
+            -- Aplica força proporcional à massa para alcançar a velocidade alvo
+            local mass = 0
+            for _, d in ipairs(charNow:GetDescendants()) do
+                local p = d :: any
+                if typeof(p) == "Instance" and p:IsA("BasePart") then
+                    mass += p.AssemblyMass
+                end
+            end
+            -- Estima força requerida: F = m * a; usamos a para ajustar à velocidade alvo no dt
+            local desiredVel = self.SmoothVel
+            local currentVel = hrpNow.AssemblyLinearVelocity
+            local a = (desiredVel - currentVel) / math.max(dt, 1/240)
+            local force = a * mass
+            self.Forces.VectorForce.Force = force
+
+            -- Orientação segue a câmera suavemente
+            local camCF = getCameraCF()
+            local goal = CFrame.new(hrpNow.Position, hrpNow.Position + camCF.LookVector)
+            self.Forces.AlignOrientation.CFrame = goal
+        else
+            -- Fallback: move por CFrame incremental, respeitando dt
+            if self.SmoothVel.Magnitude > 0.001 then
+                hrpNow.CFrame += self.SmoothVel * dt
+            end
+            -- Alinhar levemente ao olhar da câmera
+            local camCF = getCameraCF()
+            local _, _, _, r00, r01, r02, r10, r11, r12, r20, r21, r22 = camCF:GetComponents()
+            local rot = CFrame.fromMatrix(hrpNow.Position, Vector3.new(r00, r10, r20), Vector3.new(r01, r11, r21))
+            hrpNow.CFrame = rot
+        end
+    end)
+end
+
+function FlyController:Disable()
+    if not self.Enabled then return end
+    self.Enabled = false
+
+    -- Desconecta sinais
+    if self.ConnStepped then self.ConnStepped:Disconnect() self.ConnStepped = nil end
+    if self.ConnInputBegan then self.ConnInputBegan:Disconnect() self.ConnInputBegan = nil end
+    if self.ConnInputEnded then self.ConnInputEnded:Disconnect() self.ConnInputEnded = nil end
+
+    -- Limpa forças
+    if self.Forces.VectorForce then self.Forces.VectorForce:Destroy() end
+    if self.Forces.AlignOrientation then self.Forces.AlignOrientation:Destroy() end
+    if self.Forces.Attachment then self.Forces.Attachment:Destroy() end
+    self.Forces = { Attachment = nil, VectorForce = nil, AlignOrientation = nil }
+
+    -- Restaura colisão
+    local char = self.Player.Character
+    if char then setNoClip(char, false) end
+
+    -- Reseta buffers
+    self.SmoothVel = Vector3.zero
+    for k in pairs(self.KeysDown) do
+        self.KeysDown[k] = false
+    end
+end
+
+function FlyController:Destroy()
+    self:Disable()
+    table.clear(self)
+end
+
+return FlyController
